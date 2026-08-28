@@ -50,6 +50,13 @@
 #railMapSvg .line.delay    { stroke:var(--warn); stroke-width:3.5; opacity:1 }
 #railMapSvg .line.suspended{ stroke:var(--bad);  stroke-width:3.5; opacity:1;
                              stroke-dasharray:6 4 }
+/* 「運転見合わせ」だが、こちらのサーバで走っている列車を数えられた路線。
+
+   運行情報は路線単位でしか出ない。中央本線は東京から塩尻まであるので、山の中で
+   止まっていても全線が真っ赤になる。**東京にいる観光客には、そこが誤報になる。**
+   赤は残しつつ細く薄くして、全線停止と同じ強さで出さない。 */
+#railMapSvg .line.suspended.partial{ stroke-width:2.5; opacity:.6;
+                                     stroke-dasharray:2 5 }
 /* 直通先。情報が出ているわけではなく、こちらの推測。
 
    最初は路線の色のまま opacity .85 で出したが、**推測のほうが事実より目立った** —
@@ -1649,6 +1656,9 @@ const TRAIN_SHOW_SEC = 60;   // below this it is ordinary running slack, not new
    not be cached for the life of the page the way railway metadata is — the
    periodic rescan has to see new data. Static lists keep their plain cache. */
 const LIVE_TTL_MS = 60000;
+/* 収集サーバ。走行位置を貯めて「見合わせと言っているが列車は動いている」を出す。
+   **落ちていてもアプリ本体は動くこと。** これは付加情報であって、前提ではない。 */
+const PARTIAL_URL = "https://tyra.jp/rescue/pub/status.json";
 
 /* GBFS bike share — the fallback when the train is not running. Both systems
    are reachable with the same public key. station_information is effectively
@@ -1711,6 +1721,7 @@ const I18N = {
     secRailMap:"路線図で見る",
     railMapNote:"上の路線が、首都圏のどこにあたるか。止まっている路線・遅れている路線だけを浮かせています。指でつまむと拡大できます。",
     railMapCount:"{n} 路線",
+    partialNote:"一部の区間は運転しています（走行中の列車を確認）",
     railMapDelay:"遅延",
     railMapSusp:"運転見合わせ",
     railMapJump:"周辺の路線図で、どこが止まっているか見る →",
@@ -2077,6 +2088,7 @@ const I18N = {
     secRailMap:"See it on the map",
     railMapNote:"Where those lines are. Only the ones with delays or suspensions are brought forward. Pinch to zoom in.",
     railMapCount:"{n} lines",
+    partialNote:"Some sections are still running (trains observed moving).",
     railMapDelay:"Delayed",
     railMapSusp:"Suspended",
     railMapJump:"See which lines are down on the map →",
@@ -2443,6 +2455,7 @@ const I18N = {
     secRailMap:"在线路图上查看",
     railMapNote:"上述线路位于首都圈的哪个位置。仅突出显示暂停运行和延误的线路。可双指缩放。",
     railMapCount:"{n} 条线路",
+    partialNote:"部分区间仍在运行（已确认有列车行驶）",
     railMapDelay:"延误",
     railMapSusp:"暂停运行",
     railMapJump:"在线路图上查看哪些线路停运 →",
@@ -2809,6 +2822,7 @@ const I18N = {
     secRailMap:"노선도로 보기",
     railMapNote:"위 노선이 수도권의 어디인지. 운행 중단·지연된 노선만 강조합니다. 손가락으로 확대할 수 있습니다.",
     railMapCount:"{n} 개 노선",
+    partialNote:"일부 구간은 운행 중입니다(운행 중인 열차 확인)",
     railMapDelay:"지연",
     railMapSusp:"운행 중단",
     railMapJump:"노선도에서 어디가 멈췄는지 보기 →",
@@ -3196,6 +3210,7 @@ const state = {
 };
 const cache = { railways:null, stationIndex:null, places:null, placesFrom:null, ti:null, tiAt:0,
                 trains:null, trainsAt:0, gbfs:new Map(),
+                partial:null, partialAt:0,
                 railwayById:new Map(), patterns:new Map() };
 const fresh = at => at && (Date.now() - at) < LIVE_TTL_MS;
 
@@ -3638,6 +3653,36 @@ async function getTrainInfo(){
   });
 }
 
+/* 区間運休。こちらのサーバが貯めた走行位置から、「運転見合わせ」と出ている路線で
+   実際に位置を変えた列車を数えている。7本以上 動いていれば、止まっているのは
+   別の区間。
+
+   **失敗しても黙って諦める。** ODPT の運行情報と違ってこれは付加情報で、無ければ
+   これまでどおりに出るだけ。サーバが落ちている・collect が止まっている（stale）
+   ときに古い判断を出すほうが害が大きい。 */
+async function getPartial(){
+  if (cache.partial && fresh(cache.partialAt)) return cache.partial;
+  try {
+    const ctl = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const to = ctl ? setTimeout(() => ctl.abort(), 4000) : 0;
+    const r = await fetch(PARTIAL_URL, ctl ? { signal: ctl.signal } : {});
+    if (to) clearTimeout(to);
+    if (!r.ok) throw 0;
+    const d = await r.json();
+    /* 収集が5分以上 途切れていたら使わない。古い観測で「動いています」と
+       言うのが、この機能でいちばん危ない外し方 */
+    const set = new Set();
+    if (d && !d.stale && d.lines){
+      Object.keys(d.lines).forEach(k => { if (d.lines[k].partial) set.add(k); });
+    }
+    cache.partial = set;
+    cache.partialAt = Date.now();
+    return set;
+  } catch (e) {
+    return cache.partial || new Set();
+  }
+}
+
 /* Live train positions, summarised per railway. Where odpt:TrainInformation
    says only that something is wrong, this says how wrong: how many trains are
    running, how many are late, by how much, and where the worst of them is.
@@ -3999,6 +4044,7 @@ function paintRailMap(){
   const svg = $("#railMapSvg");
   if (!svg) return;
   let delay = 0, susp = 0;
+  const shown = new Set();
   svg.querySelectorAll("[data-railway]").forEach(el => {
     const rid = el.getAttribute("data-railway");
     const meta = (cache.railwayById && cache.railwayById.get(rid)) || {};
@@ -4009,10 +4055,15 @@ function paintRailMap(){
       if (alt && operatorHits(rid, meta, alt)) info = alt;
     }
     const k = railStatus(info);
-    el.classList.remove("delay", "suspended");
+    el.classList.remove("delay", "suspended", "partial");
     if (k){
       el.classList.add(k);
       if (k === "suspended") susp++; else delay++;
+      /* 見合わせのままにしておく（実際そう出ているので）。見た目だけ落とす */
+      if (k === "suspended" && cache.partial && cache.partial.has(rid)){
+        el.classList.add("partial");
+        shown.add(rid);
+      }
     }
   });
   /* 直通先。実際に情報が出ている路線だけを起点にして、1段だけ広げる。
@@ -4031,6 +4082,7 @@ function paintRailMap(){
     }
   });
 
+  markPartial(shown);
   const n = delay + susp;
   const cnt = $("#railMapCount");
   if (cnt) cnt.textContent = n ? t("railMapCount", { n: n }) : "";
@@ -4042,6 +4094,31 @@ function paintRailMap(){
 document.addEventListener("toggle", e => {
   if (e.target && e.target.id === "sectRailMap") e.target.dataset.touched = "1";
 }, true);
+
+/* 運行情報の一覧に一行 足す。作り直さず、出来ている DOM に差す — 一覧はこの時点で
+   もう表示されていて、書き直すと読んでいる途中の画面が飛ぶ。
+
+   **「乗れます」とは言わない。** 動いている列車を7本 数えただけで、それが利用者の
+   行きたい区間とは限らない。言えるのは「全線が止まっているわけではない」まで。 */
+function markPartial(shown){
+  /* **一覧の item の class は "alert" で、"suspended" ではない**（classify は
+     normal / alert / unknown / nodata の4値）。見合わせかどうかは路線図を塗った
+     ときの判定を受け取る — 二重に判定して食い違わせない */
+  document.querySelectorAll('#lines .item[data-railway]').forEach(el => {
+    const on = !!(shown && shown.has(el.getAttribute("data-railway")));
+    const had = el.querySelector(".partial-note");
+    if (on && !had){
+      const p = document.createElement("div");
+      p.className = "partial-note";
+      p.style.cssText = "margin-top:6px;font-size:12.5px;color:var(--muted)";
+      p.textContent = t("partialNote");
+      const body = el.querySelector(".msg") || el.querySelector(".body") || el;
+      body.appendChild(p);
+    } else if (!on && had){
+      had.remove();
+    }
+  });
+}
 
 function lineInfo(rid){
   const meta = cache.railwayById.get(rid) || {};
@@ -4539,7 +4616,8 @@ function render(){
        edges. The code used to be a grey outlined chip identical to every other
        chip on the page; it is the one piece of text that already has a colour
        of its own, so it wears it. */
-    return '<div class="item ' + (l.status === "normal" ? "" : l.status) + '">' +
+    return '<div class="item ' + (l.status === "normal" ? "" : l.status) +
+      '" data-railway="' + esc(l.railwayId) + '">' +
       '<div class="bar" style="background:' + esc(l.color || "var(--faint)") + '"></div>' +
       '<div class="body">' +
         '<div class="title">' +
@@ -4581,6 +4659,8 @@ function render(){
   applyFolds();
   /* 路線図はここで塗る。走査のたび（＝15分ごとの自動更新でも）通る */
   paintRailMap();
+  /* 区間運休は待たない。届いたら塗り直す。**届かなくても画面は完成している** */
+  getPartial().then(set => { if (set && set.size) paintRailMap(); });
 
   /* --- nearest stations: one row per station, tap to use as route origin --- */
   const groups = [];
