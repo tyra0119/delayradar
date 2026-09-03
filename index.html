@@ -7677,6 +7677,7 @@ function paintBig(idx){
     applySchemaScale();
     centreSchema();
     bigMap = { schema:true, idx:idx };
+    tellCanGoBack();
     return true;
   }
   box.classList.add("hidden");
@@ -7698,6 +7699,7 @@ function openGeoMap(idx){
      there is nothing on screen to steer by. Keep the view that showed the whole
      journey so one press can always get back to it. */
   bigMap = { runs: runs, view: view, fit: Object.assign({}, view), minPer: view.per * 0.4, idx: idx };
+  tellCanGoBack();
   $("#mapBig").innerHTML = "";
   const ends = runs[runs.length - 1].pts;
   $("#mapTitle").textContent = titleOf(runs[0].pts[0].title, runs[0].pts[0].ja) + " \u2192 " +
@@ -7729,6 +7731,7 @@ function closeBigMap(fromHistory){
      took this with it — the × on the diagram did nothing at all. */
   if (!bigMap) return;
   bigMap = null;
+  tellCanGoBack();
   clearTimeout(bigMapSettle);
   $("#mapModal").classList.add("hidden");
   $("#mapBig").innerHTML = "";
@@ -9565,6 +9568,7 @@ function goStep(n, opts){
       try{ history.pushState({ step:n }, ""); stepPushes++; }catch(e){}
     }
   }
+  tellCanGoBack();
 }
 function stepBack(){
   if (step <= 1) return;
@@ -9591,6 +9595,17 @@ window.tdrBack = function(){
   }catch(e){}
   return false;
 };
+/* **押される前に知らせる。** Android 15 以降の予測型「戻る」は、キーが押される前に
+   「このアプリはこのジェスチャーを受け取るか」を知りたがる（受け取らないなら、
+   後ろのアプリを見せる動きを先に始めるため）。押されてから聞かれるのではないので、
+   ページが変わるたびにこちらから伝える。 */
+function tellCanGoBack(){
+  try{
+    if (window.AndroidApp && window.AndroidApp.setCanGoBack){
+      window.AndroidApp.setCanGoBack(!!(bigMap || step > 1));
+    }
+  }catch(e){}
+}
 /* Home unwinds the whole stack rather than adding to it: otherwise the phone's
    back key would still have five entries to chew through before it could leave
    the app, which is the thing this design set out to avoid.
