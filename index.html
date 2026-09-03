@@ -9571,6 +9571,26 @@ function stepBack(){
   if (stepPushes > 0){ try{ history.back(); return; }catch(e){} }
   goStep(step - 1, { force:true });
 }
+/* Android の戻るキーが呼ぶ。**WebView の履歴に頼らない。**
+
+   ページの移動は history.pushState で積んでいるが、この画面は
+   file:///android_asset/index.html から読まれる。**file:// は origin が null 扱いで、
+   WebView のバージョンによっては pushState が SecurityError を投げる。** 投げても
+   try/catch で握り潰されるので、履歴が積まれないまま誰も気づかない。
+
+   その結果、同じアプリが端末によって違う動きをした — 積まれた端末は戻るキーで
+   1ページ目に戻り、積まれなかった端末は canGoBack() が false になって**アプリが終了した**。
+
+   なので戻るキーは Java 側から直接ここに聞く。真を返したらこちらで処理ずみ、
+   偽なら本当に終わってよい、という意味。stepBack() は pushState が効いていない
+   ときも goStep で戻れる。 */
+window.tdrBack = function(){
+  try{
+    if (bigMap){ closeBigMap(true); return true; }
+    if (step > 1){ stepBack(); return true; }
+  }catch(e){}
+  return false;
+};
 /* Home unwinds the whole stack rather than adding to it: otherwise the phone's
    back key would still have five entries to chew through before it could leave
    the app, which is the thing this design set out to avoid.
