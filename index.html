@@ -3368,9 +3368,25 @@ const RE_NORMAL_EN    = /normal|on schedule|no delay/i;
    (Obon congestion forecasts, special trains for a festival next month …).
    Those must not raise the same alarm as a line that is actually stopped. */
 const RE_NOTICE_STATUS = /お知らせ|案内/;
+/* **まだ起きていないことを述べた文**を落とすための印。2026-09-06、東武が15路線に
+   「大雨の予報が出ております。東武線各線で、列車の遅延や運転を見合わせる場合が
+   あります」を出し、「見合わせ」の3文字で15路線すべてが赤くなった。
+   「予定です」は入れない — 「本日は終日運休する予定です」は本物の運休だから。 */
+const RE_MAYBE = /場合があります|場合がございます|可能性があります|おそれがあります|恐れがあります|見込みです/;
+/* 可能性を述べた文だけを落とす。文単位なので、同じ本文に現在形の記述があれば残る。 */
+const dropMaybe = t => String(t || "").split("。").filter(x => !RE_MAYBE.test(x)).join("。");
 function classify(info){
   const txt = ((info && info.text) || "").replace(/\s+/g,"");
   const statusJa = info && info.statusJa ? String(info.statusJa) : "";
+  /* **予告を、いま起きていることと混ぜない。** 2026-09-06、東武が15路線に
+     「大雨の予報が出ております。…列車の遅延や運転を見合わせる場合があります」を出し、
+     status は中身を言わない「運行情報あり」だった。下の statusJa による alert に落ちて、
+     東武沿線の判定が全部「関係あります」になっていた。
+
+     **狭く直す。** 「原文には 見合わせ/遅延 があるが、可能性を述べた文の中にしかない」
+     ときだけ平常とみなす。異常を表す語が最初から無い本文は、ここでは触らない —
+     こちらの語彙が足りないだけかもしれないので、alert のままにしておく。 */
+  if (RE_STRONG_ALERT.test(txt) && !RE_STRONG_ALERT.test(dropMaybe(txt))) return "normal";
   if (RE_STRONG_ALERT.test(txt)) return "alert";          // happening now
   if (RE_NORMAL.test(txt) || RE_NORMAL_EN.test(txt)) return "normal";
   if (statusJa && RE_NOTICE_STATUS.test(statusJa)) return "unknown";
@@ -3780,7 +3796,9 @@ function railStatus(info){
   if (!status && (RE_NORMAL.test(text) || RE_NORMAL_EN.test(text))) return null;
   if (status && RE_NOTICE_STATUS.test(status)) return null;   // お知らせは異常ではない
 
-  const v = status + text;
+  /* **文ごと落とす。** 語だけ消すと「運転を見合わせています。再開は長時間に及ぶ
+     場合があります」のような本物まで壊れる。文単位なら現在形の記述は残る。 */
+  const v = status + dropMaybe(text);
   if (/見合わせ|運転中止|全線運休|折返し運転|折返運転/.test(v)) return "suspended";
   if (/遅延|遅れ/.test(v)) return "delay";
   return null;
