@@ -1978,6 +1978,8 @@ const I18N = {
     legTotalBus:"計 {n} 停留所",
     legChanges:"乗り換え {k} 回",
     legDirect:"乗り換えなし",
+    legThrough:"直通列車あり（乗り換えなし）",
+    throughPill:"直通",
     legKm:"約{d} km",
     nextDep:"次の発車",
     navBack:"戻る",
@@ -2345,6 +2347,8 @@ const I18N = {
     legTotalBus:"{n} stops in total",
     legChanges:"{k} transfer(s)",
     legDirect:"no change",
+    legThrough:"through trains (no change)",
+    throughPill:"through",
     legKm:"about {d} km",
     nextDep:"Next",
     navBack:"Back",
@@ -2712,6 +2716,8 @@ const I18N = {
     legTotalBus:"共 {n} 站",
     legChanges:"换乘 {k} 次",
     legDirect:"无需换乘",
+    legThrough:"有直通列车（无需换乘）",
+    throughPill:"直通",
     legKm:"约 {d} km",
     nextDep:"下次发车",
     navBack:"返回",
@@ -3079,6 +3085,8 @@ const I18N = {
     legTotalBus:"총 {n} 정류장",
     legChanges:"환승 {k} 회",
     legDirect:"환승 없음",
+    legThrough:"직통 열차 있음 (환승 없음)",
+    throughPill:"직통",
     legKm:"약 {d} km",
     nextDep:"다음 출발",
     navBack:"뒤로",
@@ -3855,6 +3863,214 @@ function throughOf(rid){
   return throughBoth.get(rid) || new Set();
 }
 
+
+/* ---------------- 直通運転を、経路探索でも1本の線として扱う ----------------
+   ODPT の路線IDは事業者の路線ごとで、直通で1本の列車が走る区間でも境目ごとに
+   別IDになる。東京→成田空港は 総武快速線→総武本線→成田線→空港支線 の4つに
+   割れていて、乗り換え2回までの探索では届かず、常磐線→我孫子支線 という奇妙な
+   答えが出ていた。羽田→新宿は 京急蒲田 を乗り換えに数えて「2回」だった。
+   副都心線→東横線、埼京線→りんかい線 も「1回」と出ていた。
+
+   直通の並びを明示的に持ち、つないだ「合成路線」を railwayById に足す。探索は
+   合成路線を普通の路線として扱えるので、直通の区間は乗り換え0で通る。
+   **全列車が直通するわけではない**ので、カードには「直通列車あり」と書く。
+
+   区間の端は駅名。表記ゆれ（押上〈スカイツリー前〉/押上、霞ケ関/霞ヶ関）は
+   stationsByNameIndex のグループで吸収する。"*" は「つなぎ目から遠いほうの終点」。
+   上の THROUGH（路線図の波及）とは別に持つ — あちらは「止まったら巻き込まれる」
+   関係で、こちらは「1本の列車が走る区間」。重なるが同じではない。 */
+const THROUGH_CHAINS = [
+  /* JR */
+  [["JR-East.SobuRapid","東京","千葉"],["JR-East.Sobu","千葉","佐倉"],["JR-East.Narita","佐倉","成田"],["JR-East.NaritaAirportBranch","成田","成田空港"]],
+  [["JR-East.Yokosuka","*","東京"],["JR-East.SobuRapid","東京","千葉"]],
+  [["JR-East.Utsunomiya","宇都宮","東京"],["JR-East.Tokaido","東京","熱海"]],
+  [["JR-East.Takasaki","高崎","東京"],["JR-East.Tokaido","東京","熱海"]],
+  [["JR-East.ChuoRapid","東京","立川"],["JR-East.Ome","立川","青梅"]],
+  [["JR-East.Musashino","府中本町","西船橋"],["JR-East.Keiyo","西船橋","東京"]],
+  [["JR-East.SaikyoKawagoe","川越","大崎"],["TWR.Rinkai","大崎","新木場"]],
+  [["JR-East.Yokohama","八王子","東神奈川"],["JR-East.KeihinTohokuNegishi","東神奈川","桜木町"]],
+  /* 京急・都営 */
+  [["Keikyu.Airport","*","京急蒲田"],["Keikyu.Main","京急蒲田","泉岳寺"],["Toei.Asakusa","泉岳寺","押上"]],
+  [["Keikyu.Main","*","泉岳寺"],["Toei.Asakusa","泉岳寺","押上"]],
+  /* 京王・都営 */
+  [["Toei.Shinjuku","*","新宿"],["Keio.KeioNew","新宿","笹塚"],["Keio.Keio","笹塚","*"]],
+  [["Keio.Keio","新宿","調布"],["Keio.Sagamihara","調布","*"]],
+  [["Keio.Keio","新宿","北野"],["Keio.Takao","北野","*"]],
+  /* 東武・西武・メトロ・東急 */
+  [["Tobu.Tojo","*","和光市"],["TokyoMetro.Fukutoshin","和光市","渋谷"],["Tokyu.Toyoko","渋谷","横浜"]],
+  [["Tobu.Tojo","*","和光市"],["TokyoMetro.Yurakucho","和光市","新木場"]],
+  [["Seibu.Ikebukuro","*","練馬"],["Seibu.SeibuYurakucho","練馬","小竹向原"],["TokyoMetro.Fukutoshin","小竹向原","渋谷"],["Tokyu.Toyoko","渋谷","横浜"]],
+  [["Seibu.Ikebukuro","*","練馬"],["Seibu.SeibuYurakucho","練馬","小竹向原"],["TokyoMetro.Yurakucho","小竹向原","新木場"]],
+  [["TokyoMetro.Hibiya","中目黒","北千住"],["Tobu.TobuSkytree","北千住","東武動物公園"],["Tobu.Nikko","東武動物公園","南栗橋"]],
+  /* 東武の押上〜曳舟は別の路線ID（TobuSkytreeBranch）。押上 は本線の駅順に無い */
+  [["Tokyu.DenEnToshi","中央林間","渋谷"],["TokyoMetro.Hanzomon","渋谷","押上"],["Tobu.TobuSkytreeBranch","押上","曳舟"],["Tobu.TobuSkytree","曳舟","東武動物公園"],["Tobu.Nikko","東武動物公園","南栗橋"]],
+  [["Tobu.TobuSkytree","浅草","東武動物公園"],["Tobu.Isesaki","東武動物公園","*"]],
+  [["Tobu.TobuSkytree","浅草","東武動物公園"],["Tobu.Nikko","東武動物公園","*"]],
+  [["Odakyu.Odawara","本厚木","代々木上原"],["TokyoMetro.Chiyoda","代々木上原","綾瀬"],["JR-East.JobanLocal","綾瀬","取手"]],
+  [["JR-East.ChuoSobuLocal","三鷹","中野"],["TokyoMetro.Tozai","中野","西船橋"],["JR-East.ChuoSobuLocal","西船橋","津田沼"]],
+  [["TokyoMetro.Namboku","*","目黒"],["Tokyu.Meguro","目黒","日吉"],["Tokyu.TokyuShinYokohama","日吉","新横浜"],["Sotetsu.SotetsuShinYokohama","新横浜","西谷"],["Sotetsu.Main","西谷","海老名"]],
+  [["Toei.Mita","*","目黒"],["Tokyu.Meguro","目黒","日吉"],["Tokyu.TokyuShinYokohama","日吉","新横浜"],["Sotetsu.SotetsuShinYokohama","新横浜","西谷"],["Sotetsu.Main","西谷","海老名"]],
+  [["Tokyu.Toyoko","渋谷","日吉"],["Tokyu.TokyuShinYokohama","日吉","新横浜"],["Sotetsu.SotetsuShinYokohama","新横浜","西谷"],["Sotetsu.Main","西谷","海老名"]],
+  [["Odakyu.Odawara","新宿","相模大野"],["Odakyu.Enoshima","相模大野","*"]],
+  [["Odakyu.Odawara","新宿","新百合ヶ丘"],["Odakyu.Tama","新百合ヶ丘","*"]],
+  [["Seibu.Shinjuku","西武新宿","小平"],["Seibu.Haijima","小平","*"]],
+  [["Tokyu.Oimachi","大井町","溝の口"],["Tokyu.DenEnToshi","溝の口","中央林間"]]
+];
+let throughBuilt = null;
+function isThrough(rid){ return !!(throughBuilt && throughBuilt.ids.has(rid)); }
+function throughMeta(rid){ const rw = cache.railwayById.get(rid); return (rw && rw.through) || null; }
+function throughTitle(members){
+  const titles = members.map(m => (cache.railwayById.get(m) || {})["odpt:railwayTitle"] || { ja: humanizeId(m) });
+  const langs = new Set(); titles.forEach(tt => Object.keys(tt).forEach(k => langs.add(k)));
+  const out = {};
+  langs.forEach(k => {
+    const seen = [];
+    titles.forEach(tt => { const v = tt[k] || tt.ja; if (v && seen.indexOf(v) < 0) seen.push(v); });
+    out[k] = seen.join(" → ");
+  });
+  return out;
+}
+/* 路線と駅索引が揃ってから1回。どちらかが入れ替わったら作り直す。 */
+function ensureThrough(index){
+  if (!index || !index.length || !cache.railwayById.size) return;
+  if (throughBuilt && throughBuilt.forIndex === index && throughBuilt.forRailways === cache.railways) return;
+  const byName = stationsByNameIndex(index);
+  const groupIds = name => new Set((byName.get(normName(name)) || []).map(x => x["owl:sameAs"]));
+  const orderOf = rid => ((cache.railwayById.get(rid) || {})["odpt:stationOrder"] || []).slice()
+    .sort((a, b) => (a["odpt:index"] || 0) - (b["odpt:index"] || 0));
+  const ids = new Set(), byStation = new Map();
+  for (const chain of THROUGH_CHAINS){
+    const segs = [];
+    let ok = true;
+    for (let k = 0; k < chain.length; k++){
+      const rid = "odpt.Railway:" + chain[k][0];
+      const order = orderOf(rid);
+      if (!order.length){ ok = false; break; }              // 録音に無い・出ていない事業者。黙って飛ばす
+      const find = name => order.findIndex(o => groupIds(name).has(o["odpt:station"]));
+      let i = chain[k][1] === "*" ? -1 : find(chain[k][1]);
+      let j = chain[k][2] === "*" ? -1 : find(chain[k][2]);
+      if (chain[k][1] === "*" && j >= 0) i = j > (order.length - 1) / 2 ? 0 : order.length - 1;
+      if (chain[k][2] === "*" && i >= 0) j = i < (order.length - 1) / 2 ? order.length - 1 : 0;
+      if (i < 0 || j < 0 || i === j){
+        console.warn("直通の定義が地図と合わない", chain[k], i, j); ok = false; break;
+      }
+      const seq = i < j ? order.slice(i, j + 1) : order.slice(j, i + 1).reverse();
+      segs.push({ rid, seq });
+    }
+    if (!ok) continue;
+    const stationOrder = [], members = [], seg = [0];
+    segs.forEach((sg, k) => {
+      for (let n = (k === 0 ? 0 : 1); n < sg.seq.length; n++)
+        stationOrder.push({ "odpt:index": stationOrder.length, "odpt:station": sg.seq[n]["odpt:station"],
+                            "odpt:stationTitle": sg.seq[n]["odpt:stationTitle"] || null });
+      members.push(sg.rid);
+      seg.push(stationOrder.length - 1);            // この構成路線が終わる位置（次のつなぎ目）
+    });
+    const id = "odpt.Railway:Through." + chain.map(c => c[0]).join("+");
+    const first = cache.railwayById.get(members[0]) || {};
+    const pos = new Map(stationOrder.map(o => [o["odpt:station"], o["odpt:index"]]));
+    cache.railwayById.set(id, {
+      "owl:sameAs": id, "odpt:operator": first["odpt:operator"], "odpt:color": first["odpt:color"],
+      "odpt:railwayTitle": throughTitle(members), "odpt:stationOrder": stationOrder,
+      through: { members, seg, pos }
+    });
+    ids.add(id);
+    stationOrder.forEach(o => {
+      const sid = o["odpt:station"];
+      if (!byStation.has(sid)) byStation.set(sid, []);
+      byStation.get(sid).push(id);
+    });
+  }
+  throughBuilt = { forIndex: index, forRailways: cache.railways, ids, byStation };
+}
+/* この駅たちを通る合成路線 */
+function throughFor(stations){
+  const out = new Set();
+  if (!throughBuilt) return out;
+  stations.forEach(st => (throughBuilt.byStation.get(st["owl:sameAs"]) || []).forEach(id => out.add(id)));
+  return out;
+}
+/* railwayDirections の1本を、構成路線ごとの区間に分ける。1つの路線に収まるなら
+   その路線のカードと同じ乗り物なので、呼ぶ側は長さ2以上だけを使う。 */
+function throughLegs(rid, dir){
+  const th = throughMeta(rid);
+  if (!th || !dir || !dir.ids || dir.ids.length < 2) return null;
+  const idx = dir.ids.map(id => th.pos.get(id));
+  if (idx.some(x => x == null)) return null;
+  const memberOf = (a, b) => {
+    const lo = Math.min(a, b), hi = Math.max(a, b);
+    for (let k = 0; k < th.members.length; k++) if (th.seg[k] <= lo && hi <= th.seg[k + 1]) return k;
+    return -1;
+  };
+  const legs = [];
+  for (let n = 1; n < dir.ids.length; n++){
+    const k = memberOf(idx[n - 1], idx[n]);
+    if (k < 0) return null;
+    const last = legs[legs.length - 1];
+    if (last && last.k === k){ last.ids.push(dir.ids[n]); last.stations.push(dir.stations[n]); }
+    else legs.push({ k, rid: th.members[k], ids: [dir.ids[n - 1], dir.ids[n]],
+                     stations: [dir.stations[n - 1], dir.stations[n]] });
+  }
+  legs.forEach(l => { l.hops = l.ids.length - 1; });
+  return legs;
+}
+/* 両端を結ぶ合成路線のうち、実際に2つ以上の路線をまたぐもの。同じ組み合わせを
+   通るものは1つにする（東上線+副都心線+東横線 と 西武+副都心線+東横線 は、
+   池袋→横浜 ではどちらも 副都心線→東横線 で同じ乗り物）。 */
+function throughDirect(from, to){
+  const out = [], seen = new Set();
+  if (!from || !to || !from.through || !to.through) return out;
+  const idsFrom = new Set(from.stations.map(x => x["owl:sameAs"]));
+  const idsTo   = new Set(to.stations.map(x => x["owl:sameAs"]));
+  from.through.forEach(rid => {
+    if (!to.through.has(rid)) return;
+    const dirs = railwayDirections(rid, idsFrom, idsTo);
+    if (!dirs.length) return;
+    const legs = throughLegs(rid, dirs[0]);
+    if (!legs || legs.length < 2) return;
+    const key = legs.map(l => l.rid).join(">");
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ rid, dir: dirs[0], legs });
+  });
+  return out;
+}
+function stopLabel(x){ return LANG === "ja" ? x.ja : ((x.title && x.title.en) || x.ja); }
+function statusPillHtml(rid){
+  const st = lineInfo(rid);
+  if (!st) return "";
+  return ' <span class="pill ' + (st.status === "normal" ? "ok" : st.status === "alert" ? "bad" : "") + '">' +
+    esc(st.status === "normal" ? t("statusNormal") : st.status === "alert" ? t("statusAlert") : t("statusNoData")) + "</span>";
+}
+function throughPillHtml(){ return ' <span class="pill">' + esc(t("throughPill")) + "</span>"; }
+/* 直通で行ける1枚。構成路線ごとに区間を分けて描く。乗り換えの列と同じ形で、
+   つなぎ目には「直通」の行を入れる。 */
+function throughDirectCard(rid, dir, from, to){
+  const legs = throughLegs(rid, dir);
+  if (!legs || legs.length < 2) return null;
+  const stops = [from.name].concat(legs.slice(0, -1).map(l => stopLabel(l.stations[l.stations.length - 1]))).concat([to.name]);
+  const col = r => (cache.railwayById.get(r) || {})["odpt:color"] || "";
+  const nameOf = r => titleOf((cache.railwayById.get(r) || {})["odpt:railwayTitle"], humanizeId(r));
+  const legDefs = legs.map((l, i) => ({
+    name: nameOf(l.rid), color: col(l.rid),
+    pill: statusPillHtml(l.rid) + (i < legs.length - 1 ? throughPillHtml() : ""),
+    meta: t("legOff", { n: l.hops, stop: stops[i + 1] })
+  }));
+  const joinRow = v =>
+    '<div class="stoprow" style="margin:8px 0; font-weight:bold;"><span class="stopdot" style="background:var(--accent)"></span><span class="stopname">' +
+    esc(t("throughPill")) + " ・ " + esc(v) + "</span></div>";
+  const ways = '<details class="trainroute sub"><summary><div class="stoprow">' +
+      '<span class="stopdot"></span><span class="stopname">' + esc(t("stationSpanOpen")) + "</span></div></summary>" +
+    '<div style="margin:4px 0 10px 14px">' +
+      routeMapFigure(legs.map(l => ({ rid: l.rid, dir: l }))) +
+      legs.map((l, i) => renderStopSpan(l.stations, 0, l.stations.length - 1, "stationSpanTitle", null, col(l.rid)) +
+                         (i < legs.length - 1 ? joinRow(stops[i + 1]) : "")).join("") +
+    "</div></details>";
+  return routeDiagram(stops, legDefs, ways,
+    routeHead(legs[0].rid, legs[0], legs,
+      "<b>" + esc(t("legTotal", { n: dir.hops })) + "</b>" + kmTag(routeMetres([dir])) + " ・ " + esc(t("legThrough"))));
+}
+
 /* 事業者単位でしか出てこない記録を、どの路線に配るか。
 
    西武は路線ごとの記録を出さず、**事業者に1件**だけ出す。本文には路線名が
@@ -4140,6 +4356,14 @@ function markPartial(shown){
 
 function lineInfo(rid){
   const meta = cache.railwayById.get(rid) || {};
+  /* 合成路線（直通）の状態は、構成路線のいちばん悪いもの。走行位置は持たない */
+  if (meta.through){
+    const parts = meta.through.members.map(m => lineInfo(m));
+    const worst = parts.slice().sort((a, b) => STATUS_RANK[a.status] - STATUS_RANK[b.status])[0];
+    return { railwayId: rid, title: meta["odpt:railwayTitle"], color: meta["odpt:color"] || "",
+             info: worst.info, live: null, status: worst.status, distance: Infinity,
+             through: meta.through.members };
+  }
   const info = cache.ti ? infoFor(rid, meta["odpt:operator"], cache.ti) : null;
   const scanned = state.lines.find(l => l.railwayId === rid);
   if (scanned){
@@ -5718,6 +5942,7 @@ function stationNames(s){
 function matchStations(query, index){
   const q = normName(query);
   if (!q) return null;
+  ensureThrough(index);
   /* Two characters was the floor because one character of a half-typed name
      matches half of Tokyo. But 柏・蕨・泉・旭 are whole station names, and
      typing one of them returned nothing at all. Let a single character through
@@ -5800,6 +6025,8 @@ function matchStations(query, index){
     name: titleOf(hits[0]["odpt:stationTitle"], hits[0]["dc:title"]),
     stations: all,
     railways: new Set(all.map(s => s["odpt:railway"]).filter(Boolean)),
+    /* 直通の合成路線。railways には混ぜない — 出発地の路線一覧に出るのは本物だけ */
+    through: throughFor(all),
     key: bestKey
   };
 }
@@ -5931,7 +6158,17 @@ function stationsByNameIndex(idx){
     byRailway.get(r).push(s);
   }
   const keyOf = s => normName(s["dc:title"] || (s["odpt:stationTitle"] || {}).ja || "");
-  const merged = new Map();          // name key -> name key it was folded into
+  /* Pairwise, never transitive. Folding the lists into each other let each
+     merge carry everything the previous ones had brought in: 大手町⇄東京,
+     東京⇄京橋, 京橋⇄銀座一丁目, 銀座一丁目⇄有楽町, 有楽町⇄日比谷, 日比谷⇄銀座 —
+     each pair inside 400 m, and the 「東京」 group ended up holding 34 records
+     from 大手町 to 東銀座, 1.5 km end to end. 葛西→東京 then offered 東西線 to
+     大手町, a walk to 有楽町, and one stop on the 山手線, as a route equal to the
+     real one. So every merge reads from the groups as they were before any
+     merging, and adds only the other half of its own declared pair. */
+  const before = new Map();
+  for (const [k, list] of stationsByName) before.set(k, list.slice());
+  const merged = new Set();          // "ka|kb", so a pair is added once
   for (const s of index){
     const conn = s["odpt:connectingRailway"] || [];
     if (!conn.length || !s["geo:lat"]) continue;
@@ -5941,12 +6178,14 @@ function stationsByNameIndex(idx){
       for (const other of (byRailway.get(r) || [])){
         const kb = keyOf(other);
         if (!kb || kb === ka || !near(s, other)) continue;
-        if (merged.get(kb) === ka || merged.get(ka) === kb) continue;
+        const tag = ka < kb ? ka + "|" + kb : kb + "|" + ka;
+        if (merged.has(tag)) continue;
         const listA = stationsByName.get(ka), listB = stationsByName.get(kb);
-        if (!listA || !listB) continue;
-        listB.forEach(x => { if (!listA.includes(x)) listA.push(x); });
-        listA.forEach(x => { if (!listB.includes(x)) listB.push(x); });
-        merged.set(kb, ka);
+        const origA = before.get(ka), origB = before.get(kb);
+        if (!listA || !listB || !origA || !origB) continue;
+        origB.forEach(x => { if (!listA.includes(x)) listA.push(x); });
+        origA.forEach(x => { if (!listB.includes(x)) listB.push(x); });
+        merged.add(tag);
       }
     }
   }
@@ -5991,10 +6230,13 @@ function findTransferRoutes(from, to, idx){
     const r2Matches = [];
 
     for (const s of stationList) {
-      const rws = [s["odpt:railway"]].concat(s["odpt:connectingRailway"] || []).filter(Boolean);
+      const rws = [s["odpt:railway"]].concat(s["odpt:connectingRailway"] || []).filter(Boolean)
+        .concat(throughBuilt ? (throughBuilt.byStation.get(s["owl:sameAs"]) || []) : []);
+      const atFrom = r => from.railways.has(r) || (from.through && from.through.has(r));
+      const atTo   = r => to.railways.has(r)   || (to.through   && to.through.has(r));
       for (const r of rws) {
-        if (from.railways.has(r) && railwayServes(r, new Set([s["owl:sameAs"]]))) r1Matches.push({ s, railway: r });
-        if (to.railways.has(r) && railwayServes(r, new Set([s["owl:sameAs"]]))) r2Matches.push({ s, railway: r });
+        if (atFrom(r) && railwayServes(r, new Set([s["owl:sameAs"]]))) r1Matches.push({ s, railway: r });
+        if (atTo(r)   && railwayServes(r, new Set([s["owl:sameAs"]]))) r2Matches.push({ s, railway: r });
       }
     }
 
@@ -6108,7 +6350,32 @@ const STOP_COST_M = 600, CHANGE_COST_M = 3000;
 function effortOf(metres, hops, changes){
   return (metres || 0) + (hops || 0) * STOP_COST_M + (changes || 0) * CHANGE_COST_M;
 }
-const SHORTCUT_RATIO = 0.7;
+/* A notice on a leg is a cost, not a tier. Putting every clear route ahead of
+   every disrupted one, before distance was looked at, ranked 副都心線 → 小田原線
+   → 南武線 (41 stops, 48 km) above 東上線 → 武蔵野線 → 中央線快速 (9 stops,
+   27 km) for 和光市→立川 on a day the 中央線快速 merely had a delay out — and on
+   the live app that day the 9-stop route was not shown at all. A delay notice
+   is typically ten to twenty minutes; on a half-hour trip that is a third to a
+   half again, which is what this charges per disrupted leg. Two disrupted legs
+   cost twice that. It only ever compares routes with each other. */
+const BAD_PENALTY = 0.35;
+function rankCost(metres, hops, changes, bads){
+  return effortOf(metres, hops, changes) * (1 + BAD_PENALTY * (bads || 0));
+}
+/* How much a leg's notice weighs: a delay is a cost, a suspension is three of
+   them. With one weight for both, 和光市→立川 put 東上線 → 武蔵野線 → 中央線快速
+   first on a day the 武蔵野線 was suspended — nine stops, of which five were
+   not running. A suspended leg still counts as a route (the line may be moving
+   in part, and the reader can see the notice), but not a cheaper one than a
+   clear line twice the length. */
+function badWeight(l){
+  if (!l || !(l.status === "alert" || l.status === "unknown")) return 0;
+  return railStatus(l.info) === "suspended" ? 3 : 1;
+}
+/* A disrupted route earns its slot whenever it is shorter than the best clear
+   one at all. The old 0.7 meant "at least 30% shorter", and a 33 km clear
+   alternative was enough to hide a 27 km route with a notice on it. */
+const SHORTCUT_RATIO = 1.0;
 function withShortcut(picked, pool, cap, costOf, badOf){
   const out = picked.slice(0, cap);
   if (!out.length) return out;
@@ -6169,7 +6436,7 @@ function findDoubleTransferRoutes(from, to, idx, limit){
     }
   }
 
-  const badLeg = rid => { const l = lineInfo(rid); return l && (l.status === "alert" || l.status === "unknown") ? 1 : 0; };
+  const badLeg = rid => badWeight(lineInfo(rid));
   const bads = r => badLeg(r.rid1) + badLeg(r.rid2) + badLeg(r.rid3);
   /* Sorting only by "is it running" left everything else in the order the
      station-name map happened to iterate, and the build loop below stops after
@@ -6259,7 +6526,7 @@ function findDoubleTransferRoutes(from, to, idx, limit){
                                     metres:routeMetres(legs) }));
   }
   /* now the real length, measured along the rails */
-  out.sort((a, b) => (bads(a) - bads(b)) || (a.metres - b.metres));
+  out.sort((a, b) => rankCost(a.metres, a.hops, 2, bads(a)) - rankCost(b.metres, b.hops, 2, bads(b)));
   return withShortcut(out, out, cap, x => effortOf(x.metres, x.hops, 2), x => bads(x) > 0);
 }
 
@@ -6392,6 +6659,7 @@ async function checkRoute(opts){
      only a line that runs the whole way counts as "just take the other one" */
   const throughIds = (from && to)
       ? Array.from(from.railways).filter(r => to.railways.has(r))
+          .concat(throughDirect(from, to).map(x => x.rid))
       : [];
   let directIds = throughIds.slice();
   let isTransfer = false;
@@ -8056,6 +8324,13 @@ async function departuresFrom(rid, fromId, nextId, fromMin){
 /* The slot the card leaves for it. Filled once the cards are on screen. */
 function nextDepSlot(rid, dir, style){
   if (!dir || !dir.ids || dir.ids.length < 2) return "";
+  /* a through-service chain has no timetable of its own — the first train out
+     is on the first line actually ridden */
+  if (isThrough(rid)){
+    const legs = throughLegs(rid, dir);
+    if (!legs || !legs.length) return "";
+    rid = legs[0].rid; dir = legs[0];
+  }
   return '<span class="nextdep"' + (style ? ' data-style="' + esc(style) + '"' : "") +
          ' data-rw="' + esc(rid) + '" data-from="' + esc(dir.ids[0]) +
          '" data-next="' + esc(dir.ids[1]) + '"></span>';
@@ -8190,8 +8465,12 @@ function renderHowTo(from, to, index){
   const idsTo   = new Set(to   ? to.stations.map(x => x["owl:sameAs"])   : []);
   if (from && to){
     direct = Array.from(from.railways).filter(rid => to.railways.has(rid));
+    /* 直通で行ける合成路線。乗り換えなしの列の一員として並ぶ */
+    const throughCards = new Map();
+    throughDirect(from, to).forEach(x => { throughCards.set(x.rid, x); direct.push(x.rid); });
     if (direct.length){
       const rows = direct.map(rid => {
+        if (throughCards.has(rid)) return throughDirectCard(rid, throughCards.get(rid).dir, from, to);
         const rw = cache.railwayById.get(rid) || {};
         const scanned = lineInfo(rid);
         const pill = scanned
@@ -8243,7 +8522,7 @@ function renderHowTo(from, to, index){
       direct.forEach((rid, i) => {
         if (!rows[i]) return;
         const dirs = railwayDirections(rid, idsFrom, idsTo);
-        trainCards.push({ bad: badLine(lineInfo(rid)) ? 1 : 0,
+        trainCards.push({ bad: badWeight(lineInfo(rid)),
                           metres: dirs.length ? routeMetres([dirs[0]]) : Infinity,
                           hops: dirs.length ? dirs[0].hops : 0, changes: 0,
                           rids: [rid], html: rows[i] });
@@ -8255,7 +8534,13 @@ function renderHowTo(from, to, index){
        and nothing else. Whenever every direct line is disrupted, look for the
        way round as well: 朝霞→和光市 で有楽町線 に乗り換えれば池袋 に着く。 */
     directAllBad = direct.length > 0 && direct.every(rid => badLine(lineInfo(rid)));
-    if (!direct.length || directAllBad){
+    /* A through-service chain is a direct line the operators do not promise —
+       not every train runs through, and the reader cannot see which — so it does
+       not close the search the way a real one does. 北千住→渋谷 had only the
+       半蔵門線 chain (19 stops) and lost 千代田線 → 表参道 → 銀座線 (15 stops, one
+       change), which is the way most people go. */
+    const onlyThrough = direct.length > 0 && direct.every(isThrough);
+    if (!direct.length || directAllBad || onlyThrough){
       /* Rank before cutting, and count each pair of lines once.
          東京→和光市 came back with 26 candidates, of which only four were shown
          — and the four were whichever the station-name map happened to reach
@@ -8272,6 +8557,9 @@ function renderHowTo(from, to, index){
         const d1 = railwayDirections(tr.rid1, idsFrom, new Set([tr.viaId1]));
         const d2 = railwayDirections(tr.rid2, new Set([tr.viaId2]), idsTo);
         if (!d1.length || !d2.length) return;      // stationOrder does not join these up
+        /* a through-service leg that stays on one of its lines is that line's card */
+        if (isThrough(tr.rid1) && (throughLegs(tr.rid1, d1[0]) || []).length < 2) return;
+        if (isThrough(tr.rid2) && (throughLegs(tr.rid2, d2[0]) || []).length < 2) return;
         const hops = d1[0].hops + d2[0].hops;
         /* What makes two of these the same ride is not the pair of lines — it
            is where you get on the second one. 和光市→海浜幕張 offers 有楽町線 →
@@ -8282,11 +8570,25 @@ function renderHowTo(from, to, index){
            on the line pair alone all three collapsed into one and 新木場 was the
            one thrown away. Keyed on the boarding station, the duplicates still
            collapse and the real alternative survives. */
-        const key = tr.rid1 + ">" + tr.rid2 + ">" + tr.viaId2;
+        /* Two chains that ride the same lines here are one ride: 品川→新横浜
+           came back with 目黒線 → 東急新横浜線 twice, once under the 南北線 chain
+           and once under the 三田線 chain, neither of which it touched. */
+        const ridKey = (rid, d) => {
+          const legs = isThrough(rid) ? throughLegs(rid, d) : null;
+          return legs && legs.length ? legs.map(l => l.rid).join("+") : rid;
+        };
+        const k1 = ridKey(tr.rid1, d1[0]), k2 = ridKey(tr.rid2, d2[0]);
+        /* Stepping from a line onto its own through service is not a change of
+           trains. Once the chains were searchable, 新宿→東京テレポート offered
+           埼京線 → (埼京線+りんかい線) and (埼京線+りんかい線) → りんかい線 beside the
+           real card — the same train, described as a transfer. */
+        const m1 = k1.split("+"), m2 = k2.split("+");
+        if (m1.some(r => m2.indexOf(r) >= 0)) return;
+        const key = k1 + ">" + k2 + ">" + tr.viaId2;
         const cur = byPair.get(key);
         if (cur && cur.hops <= hops) return;
-        byPair.set(key, { tr, d1, d2, hops, metres: routeMetres([d1[0], d2[0]]),
-          bad: (badLine(lineInfo(tr.rid1)) ? 1 : 0) + (badLine(lineInfo(tr.rid2)) ? 1 : 0) });
+        byPair.set(key, { tr, d1, d2, hops, k1, k2, metres: routeMetres([d1[0], d2[0]]),
+          bad: badWeight(lineInfo(tr.rid1)) + badWeight(lineInfo(tr.rid2)) });
       });
       /* a route that stays on the broken line the whole way is not a way round,
          so disruption outranks distance */
@@ -8296,10 +8598,11 @@ function renderHowTo(from, to, index){
          Cap it so that widening the key above cannot flood the ranking with one
          line pair and crowd out the others. */
       const perPair = new Map();
+      const cost1 = c => rankCost(c.metres, c.hops, 1, c.bad);
       const ranked = Array.from(byPair.values())
-        .sort((a, b) => a.bad - b.bad || a.metres - b.metres)
+        .sort((a, b) => cost1(a) - cost1(b))
         .filter(c => {
-          const k = c.tr.rid1 + ">" + c.tr.rid2;
+          const k = c.k1 + ">" + c.k2;
           const n = perPair.get(k) || 0;
           if (n >= 2) return false;
           perPair.set(k, n + 1);
@@ -8312,14 +8615,14 @@ function renderHowTo(from, to, index){
       const transferRoutes = [];
       const arrivals = new Set();
       ranked.forEach(c => {
-        if (transferRoutes.length >= 4 || arrivals.has(c.tr.rid2)) return;
-        arrivals.add(c.tr.rid2); transferRoutes.push(c);
+        if (transferRoutes.length >= 4 || arrivals.has(c.k2)) return;
+        arrivals.add(c.k2); transferRoutes.push(c);
       });
       ranked.forEach(c => {
         if (transferRoutes.length >= 4 || transferRoutes.indexOf(c) >= 0) return;
         transferRoutes.push(c);
       });
-      transferRoutes.sort((a, b) => a.bad - b.bad || a.metres - b.metres);
+      transferRoutes.sort((a, b) => cost1(a) - cost1(b));
       /* the same exception one change down: a much shorter route with a notice
          on it is worth a slot */
       const oneChange = withShortcut(transferRoutes, ranked, 4,
@@ -8337,6 +8640,7 @@ function renderHowTo(from, to, index){
               esc(scanned1.status === "normal" ? t("statusNormal") : scanned1.status === "alert" ? t("statusAlert") : t("statusNoData")) + "</span>"
             : "";
           const name1 = esc(titleOf(rw1["odpt:railwayTitle"], humanizeId(tr.rid1)));
+          const through1 = isThrough(tr.rid1) ? throughPillHtml() : "";
 
           const rw2 = cache.railwayById.get(tr.rid2) || {};
           const scanned2 = lineInfo(tr.rid2);
@@ -8345,8 +8649,17 @@ function renderHowTo(from, to, index){
               esc(scanned2.status === "normal" ? t("statusNormal") : scanned2.status === "alert" ? t("statusAlert") : t("statusNoData")) + "</span>"
             : "";
           const name2 = esc(titleOf(rw2["odpt:railwayTitle"], humanizeId(tr.rid2)));
+          const through2 = isThrough(tr.rid2) ? throughPillHtml() : "";
 
           const viaName = esc(tr.transferStationName);
+          /* a through-service leg is named by the lines it actually rides, not
+             every line in the chain — 羽田→新宿 rides 空港線 and 京急本線 to 品川,
+             and the 浅草線 beyond has no business on the card */
+          const usedName = (rid, d) => {
+            const legs = isThrough(rid) ? throughLegs(rid, d) : null;
+            const nm = r => titleOf((cache.railwayById.get(r) || {})["odpt:railwayTitle"], humanizeId(r));
+            return legs && legs.length ? legs.map(l => nm(l.rid)).join(" → ") : nm(rid);
+          };
 
           const dirs1 = cand.d1, dirs2 = cand.d2;   // worked out during ranking
           const hops1 = dirs1[0].hops;
@@ -8372,10 +8685,10 @@ function renderHowTo(from, to, index){
 
           return { clear: cand.bad === 0, html: routeDiagram(
             [from.name, tr.transferStationName, to.name],
-            [{ name: titleOf(rw1["odpt:railwayTitle"], humanizeId(tr.rid1)), color: rw1["odpt:color"] || "",
-               pill: pill1, meta: t("legOff", { n: hops1, stop: tr.transferStationName }) },
-             { name: titleOf(rw2["odpt:railwayTitle"], humanizeId(tr.rid2)), color: rw2["odpt:color"] || "",
-               pill: pill2, meta: t("legOff", { n: hops2, stop: to.name }) }],
+            [{ name: usedName(tr.rid1, dirs1[0]), color: rw1["odpt:color"] || "",
+               pill: pill1 + through1, meta: t("legOff", { n: hops1, stop: tr.transferStationName }) },
+             { name: usedName(tr.rid2, dirs2[0]), color: rw2["odpt:color"] || "",
+               pill: pill2 + through2, meta: t("legOff", { n: hops2, stop: to.name }) }],
             ways,
             routeHead(tr.rid1, dirs1[0], [dirs1[0], dirs2[0]],
               "<b>" + esc(t("legTotal", { n: totalHops })) + "</b>" + kmTag(cand.metres) + " ・ " +
@@ -8471,9 +8784,8 @@ function renderHowTo(from, to, index){
 
           rows2.forEach((html, i) => {
             const tr = twice[i];
-            trainCards.push({ bad: tr ? (badLine(lineInfo(tr.rid1)) ? 1 : 0) +
-                                        (badLine(lineInfo(tr.rid2)) ? 1 : 0) +
-                                        (badLine(lineInfo(tr.rid3)) ? 1 : 0) : 1,
+            trainCards.push({ bad: tr ? badWeight(lineInfo(tr.rid1)) + badWeight(lineInfo(tr.rid2)) +
+                                        badWeight(lineInfo(tr.rid3)) : 1,
                               metres: tr && tr.metres ? tr.metres : Infinity,
                               hops: tr ? tr.hops : 0, changes: 2,
                               rids: tr ? [tr.rid1, tr.rid2, tr.rid3] : [], html: html });
@@ -8481,8 +8793,21 @@ function renderHowTo(from, to, index){
         }
       }
     }
-    /* running first, then least effort */
-    trainCards.sort((a, b) => a.bad - b.bad || effort(a) - effort(b));
+    /* Least effort, with a notice on a leg charged as extra distance — and the
+       first card is the cheapest route that is clear end to end, whenever there
+       is one. The reader takes the first card; a route with a notice on it can
+       sit second with its label, not first without one. */
+    trainCards.sort((a, b) => rankCost(a.metres, a.hops, a.changes, a.bad) -
+                              rankCost(b.metres, b.hops, b.changes, b.bad));
+    /* …unless that clear route costs twice the shortest one. On a day the
+       武蔵野線 and the 中央線快速 both had notices out, the only route clear end to
+       end for 和光市→立川 was 副都心線 → 東横線 → 南武線: 44 stops and 57 km for a
+       20 km trip, and it went to the top with a star on it. A way round that
+       doubles the journey is a different journey; it stays in the list, lower. */
+    const rawAll = trainCards.map(effort).filter(m => m && isFinite(m));
+    const rawMin = rawAll.length ? Math.min.apply(null, rawAll) : 0;
+    const firstClear = trainCards.findIndex(c => !c.bad && (!rawMin || effort(c) <= rawMin * 2));
+    if (firstClear > 0) trainCards.unshift(trainCards.splice(firstClear, 1)[0]);
     if (trainCards.length){
       /* The list is already in the order the app would take them; say so on
          the first one, but only when it is actually clear end to end and only
@@ -8499,8 +8824,23 @@ function renderHowTo(from, to, index){
       const REACH_FACTOR = 2.5;
       const lengths = trainCards.map(c => c.metres).filter(m => m && isFinite(m));
       const shortestM = lengths.length ? Math.min.apply(null, lengths) : 0;
-      const usable = shortestM
-        ? trainCards.filter(c => !c.metres || !isFinite(c.metres) || c.metres <= shortestM * REACH_FACTOR)
+      /* The straight line between the two ends bounds it too. Through-service
+         chains brought a new kind of candidate — 副都心線 → 東横線 to 武蔵小杉,
+         then the 南武線 — that is 57 km for the 20.6 km of 和光市→立川 and still
+         inside 2.5 × the 27 km shortest. Two and a half times the crow's
+         distance keeps that out, and the floor of 1.5 × the shortest keeps a
+         trip the railway itself has to bend around (a bay, a river) from
+         losing every alternative. */
+      const straightM = (from && to) ? endpointMetres(from, to) : 0;
+      const reachM = shortestM
+        ? (straightM ? Math.max(straightM * REACH_FACTOR, shortestM * 1.5) : shortestM * REACH_FACTOR)
+        : 0;
+      /* A line that runs the whole way is never too far: 「この電車に乗ったまま」
+         is the simplest instruction there is, and the 山手線 for 新宿→東京
+         (16 km against 5.9 in a straight line) is a real way people go. The
+         bound is for routes that change trains. */
+      const usable = reachM
+        ? trainCards.filter(c => !c.changes || !c.metres || !isFinite(c.metres) || c.metres <= reachM)
         : trainCards;
       const shown = withShortcut(usable, usable, 6, effort, c => c.bad > 0);
       /* Which of them is here in spite of the ordering, and therefore needs a
@@ -8521,12 +8861,12 @@ function renderHowTo(from, to, index){
          its lines carry notices, is exactly the case the label exists for. */
       const clearM = shown.filter(c => !c.bad).map(effort).filter(m => m && isFinite(m));
       const bestM = clearM.length ? Math.min.apply(null, clearM) : 0;
-      const top = shown[0];
-      const isShortcut = c => {
-        if (!c.bad) return false;
-        if (bestM) return effort(c) < bestM * SHORTCUT_RATIO;
-        return !!top && c !== top && c.bad > top.bad && effort(c) < effort(top);
-      };
+      /* The label goes on one card: the shortest route by the bare measure,
+         when it carries a notice — and, if something clear is on the list,
+         only when it is shorter than that too. Wherever it sits. */
+      const rawM = shown.map(effort).filter(m => m && isFinite(m));
+      const minRaw = rawM.length ? Math.min.apply(null, rawM) : 0;
+      const isShortcut = c => !!c.bad && effort(c) === minRaw && (!bestM || effort(c) < bestM);
       /* A line in the middle of a route belongs to neither end, so neither the
          verdict (which is built from the lines that serve the two stations) nor
          「参考：出発地・目的地の他の路線」 ever mentions it. 和光市→立川 runs
